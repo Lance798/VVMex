@@ -1,5 +1,6 @@
 #pragma once
 #include "dynamics/DynamicalCore.hpp"
+#include "physics/cleo/cleo_interface.hpp"
 #include "physics/p3/VVM_p3_process_interface.hpp"
 #include "physics/rrtmgp/VVM_rrtmgp_process_interface.hpp"
 #include "physics/turbulence/TurbulenceProcess.hpp"
@@ -46,6 +47,7 @@ private:
 
     std::unique_ptr<Dynamics::DynamicalCore> dycore_;
     std::unique_ptr<Physics::VVM_P3_Interface> microphysics_;
+    std::unique_ptr<Physics::CLEO_Interface> cleo_;
     std::unique_ptr<Physics::TurbulenceProcess> turbulence_;
     std::unique_ptr<Physics::SurfaceProcess> surface_;
     std::unique_ptr<Physics::RRTMGP::RRTMGPRadiation> radiation_;

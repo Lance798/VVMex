@@ -33,6 +33,11 @@ Model::Model(const Utils::ConfigurationManager& config,
         microphysics_ = std::make_unique<Physics::VVM_P3_Interface>(config_, grid_, params_, halo_exchanger_, state_);
     }
 
+    if (config_.get_value<bool>("physics.cleo.enable_cleo", false)) {
+        std::cout << "[CLEO] CLEO enabled" << std::endl;
+        cleo_ = std::make_unique<Physics::CLEO_Interface>(config_, grid_, params_, halo_exchanger_, state_);
+    }
+
     if (config_.get_value<bool>("physics.turbulence.enable_turbulence", false)) {
         turbulence_ = std::make_unique<Physics::TurbulenceProcess>(config_, grid_, params_, halo_exchanger_, state_);
     }
@@ -102,6 +107,7 @@ void Model::init() {
     initializer.initialize_state();
 
     if (microphysics_) microphysics_->initialize(state_);
+    if (cleo_) cleo_->initialize(state_);
     if (turbulence_) turbulence_->initialize(state_);
     if (radiation_) radiation_->initialize(state_);
     if (sponge_layer_) sponge_layer_->initialize(state_);
@@ -255,6 +261,11 @@ void Model::run_step(VVM::Real dt) {
     if (microphysics_) {
         VVM::Utils::Timer timer("microphysics");
         microphysics_->run(state_, dt);
+    }
+
+    if (cleo_) {
+        VVM::Utils::Timer timer("cleo");
+        cleo_->run(state_, dt);
     }
 
     // Turbulence diffusion on thermodynamics variables
@@ -442,6 +453,7 @@ void Model::run_step(VVM::Real dt) {
 
 void Model::finalize() {
     if (microphysics_) microphysics_->finalize();
+    if (cleo_) cleo_->finalize();
     if (radiation_) radiation_->finalize();
     if (land_) land_->finalize();
 }
