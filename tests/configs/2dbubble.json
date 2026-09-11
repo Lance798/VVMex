@@ -19,9 +19,9 @@
         "rcemip_grid_data_path": "./rundata/initial_conditions/profiles/snd_rcemip_anal300_v3.txt"
     },
     "simulation": {
-        "total_time_s": 1500.0,
+        "total_time_s": 3000.0,
         "dt_s": 1.0,
-        "output_interval_s": 1500.0,
+        "output_interval_s": 10.0,
         "idealized_test": "2dbubble",
         "__idealized_test": "none, advection_u, advection_v, advection_w, stretching, twisting, 2dbubble"
     },
@@ -40,12 +40,27 @@
         "__Tg_source_options": "atmosphere, netcdf",
         "variables_to_read": {
             "2d": [
-                "lon", "lat",
-                "topo", "sea_land_ice_mask", 
-                "vegtype", "soiltype", "slopetype", "Tg", 
-                "albedo", "gvf", "lai", "shdmax", "shdmin",
-                "sm1", "sm2", "sm3", "sm4",
-                "sl1", "sl2", "sl3", "sl4"
+                "lon",
+                "lat",
+                "topo",
+                "sea_land_ice_mask",
+                "vegtype",
+                "soiltype",
+                "slopetype",
+                "Tg",
+                "albedo",
+                "gvf",
+                "lai",
+                "shdmax",
+                "shdmin",
+                "sm1",
+                "sm2",
+                "sm3",
+                "sm4",
+                "sl1",
+                "sl2",
+                "sl3",
+                "sl4"
             ]
         }
     },
@@ -59,17 +74,56 @@
         "__data_transport": "ucx (it will choose automatically), RDMA (for machines with infinite band), WAN (using network), and empty (for single node auto design by ADIOS2) ",
         "output_filename_prefix": "vvm_output",
         "fields_to_output": [
-            "thbar", "pibar", "rhobar", "rhobar_up",
-            "u", "v", "w", "th", "xi", "eta", "zeta",
-            "qv", "qc", "qr", "qi",
-            "sw_heating", "lw_heating", "swdn", "lwdn", "lwup",
-            "swup_toa", "swdn_toa", "lwup_toa", "lwdn_toa",
-            "swup_sfc", "swdn_sfc", "lwup_sfc", "lwdn_sfc",            
-            "precip_liq_surf_mass", "precip_ice_surf_mass",
-            "Tg", "sfc_flux_th", "sfc_flux_qv", "sfc_flux_u", "sfc_flux_v", "le", "hfx",
-            "st1", "st2", "st3", "st4", "gfx", "topo",
-            "slc1", "slc2", "slc3", "slc4", "sfemis", "zorl",
-            "chx", "cmx", "albedo"
+            "thbar",
+            "pibar",
+            "rhobar",
+            "rhobar_up",
+            "u",
+            "v",
+            "w",
+            "th",
+            "xi",
+            "eta",
+            "zeta",
+            "qv",
+            "qcond",
+            "sw_heating",
+            "lw_heating",
+            "swdn",
+            "lwdn",
+            "lwup",
+            "swup_toa",
+            "swdn_toa",
+            "lwup_toa",
+            "lwdn_toa",
+            "swup_sfc",
+            "swdn_sfc",
+            "lwup_sfc",
+            "lwdn_sfc",
+            "precip_liq_surf_mass",
+            "precip_ice_surf_mass",
+            "Tg",
+            "sfc_flux_th",
+            "sfc_flux_qv",
+            "sfc_flux_u",
+            "sfc_flux_v",
+            "le",
+            "hfx",
+            "st1",
+            "st2",
+            "st3",
+            "st4",
+            "gfx",
+            "topo",
+            "slc1",
+            "slc2",
+            "slc3",
+            "slc4",
+            "sfemis",
+            "zorl",
+            "chx",
+            "cmx",
+            "albedo"
         ],
         "output_grid": {
             "x_start": 0,
@@ -85,7 +139,7 @@
             "w_solver_method": "tridiagonal",
             "_w_solver_method_options": "Choose 'tridiagonal' (original) or 'jacobi' (3D parallel)",
             "iteration": 200,
-            "WRXMU": 2.5e-7
+            "WRXMU": 2.5e-07
         },
         "forcings": {
             "sponge_layer": {
@@ -115,7 +169,9 @@
                 "offset": 14000.0,
                 "width": 4000.0,
                 "radius": 4000.0,
-                "target_vars": ["qv"],
+                "target_vars": [
+                    "qv"
+                ],
                 "forcing_data": {
                     "time_varying": false,
                     "directory": "../rundata/LS_forcings/",
@@ -128,7 +184,6 @@
                 "enable": false,
                 "uvtau": 7200,
                 "nudge_start_m": 0
-
             }
         },
         "prognostic_variables": {
@@ -312,14 +367,92 @@
             "make_lookup_table": false,
             "do_predict_nc": true,
             "do_prescribed_ccn": false,
-            "max_total_ni": 740.0e3
+            "max_total_ni": 740000.0
+        },
+        "cleo": {
+            "enable_cleo": true,
+            "ngbxs": 33792,
+            "__ngbxs": "global physical gridboxes = grid.nz * grid.nx * grid.ny. tools/cleo/gen_cleo_inputs.py recomputes this from the grid and refuses to run if they disagree.",
+            "init_gbx_path": "./build/cleo/share/vvm_dimlessGBxboundaries.dat",
+            "init_supers_path": "./build/cleo/share/vvm_dimlessSDsinit.dat",
+            "__init_paths": "written by tools/cleo/gen_cleo_inputs.py. Relative paths resolve against the repository root, not the working directory.",
+            "timesteps_s": {
+                "condensation": 0.2,
+                "collision": 0.2,
+                "motion": 0.2,
+                "observation": 10.0,
+                "coupling": 1.0,
+                "__constraint": "CLEO requires max(condensation, collision) <= min(coupling_step_seconds, motion, observation), and rounds every step to 1/100 s. T_END comes from simulation.total_time_s."
+            },
+            "superdroplets": {
+                "per_gridbox": 32,
+                "__per_gridbox": "needs a convergence test (8/32/128) before any result is trusted.",
+                "seed_below_z_m": 40000.0,
+                "__seed_below_z_m": "gridboxes whose UPPER bound is <= this get superdroplets; the test is inclusive, so 4000 seeds the level ending exactly at 4000 m. null seeds every gridbox, as does any value at or above the domain top.",
+                "max_total": 1081344,
+                "__max_total": "OUTPUT, not an input: tools/cleo/gen_cleo_inputs.py overwrites it with per_gridbox times the number of seeded gridboxes. InitAllSupersFromBinary requires it to equal the binary's count exactly, and only the generator knows that number, so editing it here does nothing but go stale.",
+                "radius_min_m": 1e-08,
+                "radius_max_m": 3e-06,
+                "__radius_min_m": "below ~1e-8 m the Kelvin term (which goes as 1/r) makes the condensation ODE maximally stiff, and those droplets can never activate: their Koehler critical supersaturation is 4-10% where an updraft reaches 0.2-1%.",
+                "numconc_tolerance": 0.01,
+                "__numconc_tolerance": "allowed relative error in the realised number concentration. cleopy's own default of 0.0 demands an exact match and almost always fails.",
+                "common_multiplicity": false,
+                "__common_multiplicity": "true = Shima et al. (2009): sample radii from the number distribution and give every superdroplet the same multiplicity. false = cleopy's convention: log10-uniform radii with the distribution carried in xi, which spends superdroplets on the large-radius tail so collision-coalescence can start.",
+                "wet_scale": 1.0,
+                "__wet_scale": "dryradius = radius / this. 1.0 starts the aerosol entirely dry; >1 pre-wets it, which is the nearest thing to Koehler equilibration CLEO offers.",
+                "seed": 1234
+            },
+            "aerosol": {
+                "__doc": "bimodal lognormal dry size spectrum. Take these from observations or from the paper being reproduced, not from tuning until the answer looks right.",
+                "geometric_mean_radius_m": [
+                    2e-08,
+                    1.5e-07
+                ],
+                "geometric_stddev": [
+                    1.4,
+                    1.6
+                ],
+                "number_conc_per_m3": [
+                    60000000.0,
+                    40000000.0
+                ],
+                "__number_conc_per_m3": "per-mode number concentration; the sum is the total the multiplicities are scaled to. 1e8 total is a continental value; Shima et al. (2009) Sec. 6 uses 1e7 (clean maritime). Only the sum differs between the two, so with a fixed seed the sampled radii are identical and only xi scales."
+            },
+            "microphysics": {
+                "condensation": {
+                    "do_alter_thermo": true,
+                    "maxniters": 100,
+                    "MINSUBTSTEP": 1e-05,
+                    "rtol": 0.0,
+                    "atol": 0.01
+                },
+                "coalescence_efficiency": 0.85,
+                "breakup_nfrags": 5.0,
+                "__breakup_nfrags": "average fragments per breakup event; must be > 2.5. ConstNFrags defaults to NaN and DoBreakup asserts on it, so an absent value aborts the run at the first breakup event."
+            },
+            "output": {
+                "setup_filename": "./build/cleo/bin/vvm_setup.txt",
+                "zarrbasedir": "./build/cleo/bin/vvm_sol.zarr",
+                "maxchunk": 2500000
+            },
+            "kokkos_num_threads": 0,
+            "__kokkos_num_threads": "0 lets Kokkos take every core. CLEO ignores --kokkos-num-threads on the command line because it calls Kokkos::initialize(settings), which does not parse argv; OMP_NUM_THREADS does override this."
         },
         "rrtmgp": {
             "enable_rrtmgp": false,
             "column_chunk_size": 512,
             "__column_chunk_size": "This should be modified according to domain and rank and the larger the faster (costs more memory).",
             "rad_frequency_s": 120,
-            "active_gases": ["h2o", "co2", "o3", "n2o", "co", "ch4", "o2", "n2"],
+            "active_gases": [
+                "h2o",
+                "co2",
+                "o3",
+                "n2o",
+                "co",
+                "ch4",
+                "o2",
+                "n2"
+            ],
             "fixed_total_solar_irradiance": -1,
             "fixed_solar_zenith_angle": -1,
             "pool_size_multiplier": 1.0,
@@ -341,7 +474,23 @@
         }
     },
     "optimization": {
-        "cuda_graph_halo_exchange": ["u", "w", "xi", "eta", "zeta", "th", "qv", "qc", "qi", "qr", "qm", "nc", "ni", "nr", "bm"]
+        "cuda_graph_halo_exchange": [
+            "u",
+            "w",
+            "xi",
+            "eta",
+            "zeta",
+            "th",
+            "qv",
+            "qc",
+            "qi",
+            "qr",
+            "qm",
+            "nc",
+            "ni",
+            "nr",
+            "bm"
+        ]
     },
     "constants": {
         "gravity": 9.806,
@@ -349,8 +498,8 @@
         "PSFC": 100000,
         "P0": 100000,
         "Cp": 1004.5,
-        "Lv": 2.5e6,
-        "OMEGA": 7.292e-5,
+        "Lv": 2500000.0,
+        "OMEGA": 7.292e-05,
         "PI": 3.14159265
     }
 }

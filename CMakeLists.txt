@@ -185,12 +185,21 @@ macro(vvm_unset_flag VAR FLAG DOC)
 endmacro()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
-    message(STATUS "Applying NVHPC dependency flag workaround.")
-    # Disable automatic dependency generation flags that NVHPC might set
-    set(CMAKE_CXX_DEPENDS "")
-    set(CMAKE_C_DEPENDS "")
-    set(CMAKE_DEPFILE_FLAGS_CXX "")
-    set(CMAKE_DEPFILE_FLAGS_C "")
+    # This used to clear CMAKE_DEPFILE_FLAGS_CXX/_C, which switched off header
+    # dependency tracking for the whole project: nothing emitted -MD, so editing
+    # a header rebuilt nothing and the tree silently linked objects compiled
+    # against different versions of it. That is not a cosmetic problem here --
+    # most of this model lives in headers (HaloExchangerNCCL.hpp, Field.hpp,
+    # State.hpp, Grid.hpp), and adding a member to Grid.hpp produced a binary
+    # where Grid.cpp and main.cpp disagreed on the offset of cart_comm_, which
+    # surfaced as a hang inside MPI_Cart_shift.
+    #
+    # CMake's own Compiler/NVHPC-CXX.cmake sets "-MD -MT <DEP_TARGET> -MF
+    # <DEP_FILE>", and that works with this toolchain: verified on NVHPC 26.5
+    # through plain mpic++, through nvcc_wrapper, and through the full
+    # kokkos_launch_compiler + nvcc_wrapper + mpic++ chain the build actually
+    # uses, with local headers appearing in every generated .d file. Whatever
+    # older combination needed the workaround, this one does not.
 
     # No CMAKE_CUDA_FLAGS here. This project declares LANGUAGES CXX C Fortran and
     # has no .cu sources -- device code reaches nvcc through nvcc_wrapper as CXX
@@ -497,6 +506,7 @@ if (NOT TARGET NetCDF::NetCDF_Fortran)
         INTERFACE_LINK_LIBRARIES NetCDF::NetCDF_C)
 endif()
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # ------------------------------
 # EKAT
 # ------------------------------
@@ -632,6 +642,13 @@ if (PNETCDF_INCLUDE_DIR AND PNETCDF_LIBRARY)
 else()
     message(FATAL_ERROR "PnetCDF library or includes not found at the specified path: ${PNETCDF_DIR}")
 endif()
+
+# ------------------------------
+# CLEO
+# ------------------------------
+set(cleopath ${CMAKE_SOURCE_DIR}/externals/cleo)
+message(STATUS "Using CLEO installation from: ${cleopath}")
+add_subdirectory(${cleopath} ${CMAKE_BINARY_DIR}/externals/cleo)
 
 
 # ------------------------------
