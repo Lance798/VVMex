@@ -5,7 +5,6 @@
 
 #include "core/Grid.hpp"
 #include "core/HaloExchanger.hpp"
-#include "core/Parameters.hpp"
 #include "core/State.hpp"
 #include "core/vvm_types.hpp"
 #include "utils/ConfigurationManager.hpp"
@@ -17,7 +16,6 @@ class CLEO_Interface {
 public:
     CLEO_Interface(const VVM::Utils::ConfigurationManager& config,
                    const VVM::Core::Grid& grid,
-                   const VVM::Core::Parameters& params,
                    Core::HaloExchanger& halo_exchanger,
                    Core::State& state);
 

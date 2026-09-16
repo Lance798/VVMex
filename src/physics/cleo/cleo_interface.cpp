@@ -3,6 +3,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <memory>
 #include <utility>
@@ -120,7 +121,8 @@ create_microphysics(const Timesteps& ts, const Utils::ConfigurationManager& conf
 
     // === collision ====
     const PairProbability auto collprob = LongHydroProb();
-    const NFragments auto nfrags = ConstNFrags(5);
+    const NFragments auto nfrags =
+        ConstNFrags(config.get_value<double>("physics.cleo.microphysics.breakup_nfrags", 5.0));
     const CoalBuReFlag auto coalbure_flag = TSCoalBuReFlag(RogersGKTerminalVelocity{});
 
     const MicrophysicalProcess auto colls =
@@ -235,6 +237,7 @@ struct SdmRunner {
     virtual ~SdmRunner() = default;
 
     virtual unsigned int get_couplstep() const = 0;
+    virtual unsigned int next_couplstep(unsigned int t_mdl) const = 0;
     virtual void prepare_to_timestep(dualview_gbx gbxs, const SupersInDomain& allsupers) const = 0;
     virtual void at_start_step(
         unsigned int t_mdl, dualview_gbx gbxs, const SupersInDomain& allsupers) const = 0;
@@ -254,6 +257,10 @@ struct SdmRunnerOf final : SdmRunner {
     unsigned int
     get_couplstep() const override {
         return sdm.get_couplstep();
+    }
+    unsigned int
+    next_couplstep(unsigned int t_mdl) const override {
+        return sdm.next_couplstep(t_mdl);
     }
     void
     prepare_to_timestep(dualview_gbx gbxs, const SupersInDomain& allsupers) const override {
@@ -292,18 +299,26 @@ struct CleoState {
     dualview_gbx gbxs;
     std::unique_ptr<SdmRunner> sdm;
 
-    /* Local gridbox layout, for the coupling loops. CLEO numbers a rank's own
-    gridboxes idx = k + nz*(i + nx*j) over its OWN partition (see
-    get_index_from_coordinates in cartesian_decomposition.cpp), so these are the
-    LOCAL physical sizes -- using the global ones decodes every index wrongly the
-    moment there is more than one rank. VVMex's arrays carry n_halo_cells ghost
-    cells on each side of every dimension, so a local physical coordinate becomes
-    an array index by adding halo. */
     const size_t lnz, lnx, lny, halo;
+
+    /* Write the y-mean of the SDM feedback back to every y column.
+
+    For a quasi-2-D run the y cells are not independent physics: they exist only
+    because the halo machinery needs a second point, and they are replicate
+    samples of the same 2-D column. SDM is stochastic, so their feedback differs
+    by a small random amount -- and with ny = 2 and periodic boundaries that
+    difference is precisely the Nyquist mode, which this configuration amplifies
+    with an e-folding time of about seven timesteps. Averaging removes it by
+    construction and is also the better Monte-Carlo estimate, since it uses every
+    superdroplet in the column. Leave it off for a genuinely 3-D run, where the y
+    structure is physics. */
+    const bool average_over_y;
 
     CleoState(const Utils::ConfigurationManager& config, const Core::Grid& grid)
         : ts(timesteps_from(config)),
-          store(config.get_value<std::string>("physics.cleo.output.zarrbasedir")), dataset(store),
+          store(config.get_value<std::string>("output.output_dir") +
+                config.get_value<std::string>("physics.cleo.output.zarrbasedir", "vvm_sol.zarr")),
+          dataset(store),
           gbxmaps(create_cartesian_maps(config.get_value<std::size_t>("physics.cleo.ngbxs"),
               3,
               config.get_value<std::string>("physics.cleo.init_gbx_path"),
@@ -322,17 +337,19 @@ struct CleoState {
               create_movement(ts, gbxmaps),
               create_observer(ts, config, dataset, store)))),
           lnz(grid.get_local_physical_points_z()), lnx(grid.get_local_physical_points_x()),
-          lny(grid.get_local_physical_points_y()), halo(grid.get_halo_cells()) {
+          lny(grid.get_local_physical_points_y()), halo(grid.get_halo_cells()),
+          average_over_y(config.get_value("physics.cleo.average_over_y", false)) {
         sdm->prepare_to_timestep(gbxs, allsupers);
 
         // The coupling loops decode CLEO's gridbox index with these three sizes;
         // if they do not multiply out to the gridbox count CLEO actually built,
         // every field would be mapped to the wrong cell silently.
         if (lnz * lnx * lny != gbxs.extent(0)) {
-            throw std::runtime_error(
-                "CLEO built " + std::to_string(gbxs.extent(0)) + " local gridboxes but the grid's "
-                "local physical points are " + std::to_string(lnz) + "*" + std::to_string(lnx) +
-                "*" + std::to_string(lny) + " = " + std::to_string(lnz * lnx * lny));
+            throw std::runtime_error("CLEO built " + std::to_string(gbxs.extent(0)) +
+                                     " local gridboxes but the grid's "
+                                     "local physical points are " +
+                                     std::to_string(lnz) + "*" + std::to_string(lnx) + "*" +
+                                     std::to_string(lny) + " = " + std::to_string(lnz * lnx * lny));
         }
     }
 
@@ -369,27 +386,56 @@ struct CleoState {
     }
 
     void
-    receive_dynamics(Core::State& state) {
+    receive_dynamics(Core::State& state, Core::HaloExchanger& halo_exchanger) {
         auto th = state.get_field<3>("th").get_mutable_device_data();
         auto qvap = state.get_field<3>("qv").get_mutable_device_data();
         auto qcond = state.get_field<3>("qcond").get_mutable_device_data();
+        auto qp = state.get_field<3>("qp").get_mutable_device_data();
         const auto pibar = state.get_field<1>("pibar").get_device_data();
 
-        const auto nz = lnz, nx = lnx, h = halo;
+        const auto nz = lnz, nx = lnx, ny = lny, h = halo;
+        const bool average_y = average_over_y;
         const auto d_gbxs = gbxs.view_device();
         Kokkos::parallel_for("cleo_receive_dynamics",
-            Kokkos::RangePolicy<ExecSpace>(0, d_gbxs.extent(0)),
-            KOKKOS_LAMBDA(const size_t idx) {
-                const auto k = idx % nz;
-                const auto i = (idx / nz) % nx;
-                const auto j = idx / (nz * nx);
-                const auto ka = h + k, ja = h + j, ia = h + i;
-
-                const auto& gb_state = d_gbxs(idx).state;
-                th(ka, ja, ia) = gb_state.temp * dlc::TEMP0 / pibar(ka);
-                qvap(ka, ja, ia) = gb_state.qvap;
-                qcond(ka, ja, ia) = gb_state.qcond;
+            Kokkos::RangePolicy<ExecSpace>(0, nz * nx),
+            KOKKOS_LAMBDA(const size_t ki) {
+                const auto k = ki % nz;
+                const auto i = ki / nz;
+                const auto ka = h + k, ia = h + i;
+                double t_sum = 0.0, qv_sum = 0.0, qc_sum = 0.0;
+                if (average_y) {
+                    for (size_t j = 0; j < ny; ++j) {
+                        const auto& st = d_gbxs(k + nz * (i + nx * j)).state;
+                        t_sum += st.temp;
+                        qv_sum += st.qvap;
+                        qc_sum += st.qcond;
+                    }
+                }
+                const double inv = average_y ? 1.0 / static_cast<double>(ny) : 1.0;
+                for (size_t j = 0; j < ny; ++j) {
+                    const auto ja = h + j;
+                    const auto& st = d_gbxs(k + nz * (i + nx * j)).state;
+                    const double temp = average_y ? t_sum * inv : st.temp;
+                    const double qv = average_y ? qv_sum * inv : st.qvap;
+                    const double qc = average_y ? qc_sum * inv : st.qcond;
+                    th(ka, ja, ia) = temp * dlc::TEMP0 / pibar(ka);
+                    qvap(ka, ja, ia) = qv;
+                    qcond(ka, ja, ia) = qc;
+                    qp(ka, ja, ia) = qc;
+                }
             });
+
+        // The loop writes physical cells only, so without this the halos still
+        // hold the values from before the coupling. The dynamics differentiates
+        // across them, and the resulting step at the domain edge is a forcing
+        // that is not physics: in a quasi-2-D run (ny = 2, periodic) it drives a
+        // v that should be identically zero, and that grows until the wind is
+        // large enough to break the superdroplet motion's CFL check -- which
+        // reports a timestep problem, several steps after the actual cause.
+        halo_exchanger.exchange_halos(state.get_field<3>("th"));
+        halo_exchanger.exchange_halos(state.get_field<3>("qv"));
+        halo_exchanger.exchange_halos(state.get_field<3>("qcond"));
+        halo_exchanger.exchange_halos(state.get_field<3>("qp"));
     }
 };
 
@@ -398,22 +444,19 @@ struct CleoState {
 struct CLEO_Interface::Impl {
     const Utils::ConfigurationManager& config;
     const Core::Grid& grid;
-    const Core::Parameters& params;
     Core::HaloExchanger& halo_exchanger;
-    Core::State& state;
     std::unique_ptr<CleoState> cleo;
-    unsigned int since_couple = 0; /**< model time accumulated since the last coupling, in CLEO steps */
+
+    double next_couple_s = 0.0;
+    unsigned int t_cleo = 0;
 
     Impl(const Utils::ConfigurationManager& config,
         const Core::Grid& grid,
-        const Core::Parameters& params,
-        Core::HaloExchanger& halo_exchanger,
-        Core::State& state)
-        : config(config), grid(grid), params(params), halo_exchanger(halo_exchanger), state(state) {
-    }
+        Core::HaloExchanger& halo_exchanger)
+        : config(config), grid(grid), halo_exchanger(halo_exchanger) {}
 
     void
-    initialize() {
+    initialize(Core::State& state) {
         cleo = std::make_unique<CleoState>(config, grid);
 
         std::cout << "[CLEO] rank " << grid.get_mpi_rank()
@@ -421,7 +464,10 @@ struct CLEO_Interface::Impl {
                   << config.get_value<std::size_t>("physics.cleo.ngbxs") << " gridboxes, couplstep "
                   << cleo->sdm->get_couplstep() << " (dimensionless, TIME0=" << dlc::TIME0
                   << "s), zarr at "
-                  << config.get_value<std::string>("physics.cleo.output.zarrbasedir") << std::endl;
+                  << config.get_value<std::string>("output.output_dir") +
+                         config.get_value<std::string>("physics.cleo.output.zarrbasedir",
+                             "vvm_sol.zarr")
+                  << std::endl;
 
         // send initial field to cleo gridbox
         cleo->send_dynamics(state);
@@ -430,17 +476,26 @@ struct CLEO_Interface::Impl {
 
 CLEO_Interface::CLEO_Interface(const Utils::ConfigurationManager& config,
     const Core::Grid& grid,
-    const Core::Parameters& params,
     Core::HaloExchanger& halo_exchanger,
     Core::State& state)
-    : impl_(std::make_unique<Impl>(config, grid, params, halo_exchanger, state)) {
+    : impl_(std::make_unique<Impl>(config, grid, halo_exchanger)) {
+    const std::array<int, 3> shape{grid.get_local_total_points_z(),
+        grid.get_local_total_points_y(),
+        grid.get_local_total_points_x()};
+
     state.add_field<3>("qcond",
-        {grid.get_local_total_points_z(),
-            grid.get_local_total_points_y(),
-            grid.get_local_total_points_x()},
+        shape,
         Core::FieldMetadata{Core::GridStaggering::Centered,
             "kg kg-1",
             "total condensation mixing ratio"});
+
+    if (!state.has_field("qp")) {
+        state.add_field<3>("qp",
+            shape,
+            Core::FieldMetadata{Core::GridStaggering::Centered,
+                "kg kg-1",
+                "total hydrometeor mass mixing ratio"});
+    }
 }
 
 CLEO_Interface::~CLEO_Interface() = default;
@@ -450,7 +505,7 @@ CLEO_Interface::initialize(Core::State& state) {
     if (impl_->grid.get_mpi_rank() == 0) {
         std::cout << "[CLEO] initializing..." << std::endl;
     }
-    impl_->initialize();
+    impl_->initialize(state);
 }
 
 void
@@ -458,27 +513,31 @@ CLEO_Interface::run(Core::State& state, const VVM::Real dt) {
     auto& cleo = *impl_->cleo;
     auto& sdm = *cleo.sdm;
 
-    // Accumulate first, then subtract what was spent: comparing before adding
-    // costs one whole coupling interval on the first call and then runs at half
-    // the intended rate, and resetting to 0 instead of subtracting lets the phase
-    // drift whenever dt does not divide the coupling step.
-    impl_->since_couple += realtime2step(dt);
-    if (impl_->since_couple < sdm.get_couplstep()) {
+    const double couplstep_s = step2realtime(sdm.get_couplstep());
+    if (state.get_time() + 0.5 * dt < impl_->next_couple_s) {
         return;
     }
-    impl_->since_couple -= sdm.get_couplstep();
+    impl_->next_couple_s += couplstep_s;
 
-    const auto t_mdl = realtime2step(state.get_time());
+    const auto t_mdl = impl_->t_cleo;
+    const auto t_next = t_mdl + sdm.get_couplstep();
+
+    if (t_next != sdm.next_couplstep(t_mdl)) {
+        throw std::runtime_error("CLEO is out of sync with the coupling: t_mdl " +
+                                 std::to_string(t_mdl) + " + couplstep gives " +
+                                 std::to_string(t_next) + " but the next coupling boundary is " +
+                                 std::to_string(sdm.next_couplstep(t_mdl)));
+    }
+    impl_->t_cleo = t_next;
 
     cleo.send_dynamics(state);
     sdm.at_start_step(t_mdl, cleo.gbxs, cleo.allsupers);
-    sdm.run_step(t_mdl, t_mdl + sdm.get_couplstep(), cleo.gbxs.view_device(), cleo.allsupers);
-    cleo.receive_dynamics(state);
+    sdm.run_step(t_mdl, t_next, cleo.gbxs.view_device(), cleo.allsupers);
+    cleo.receive_dynamics(state, impl_->halo_exchanger);
 }
 
 void
 CLEO_Interface::finalize() {
-    // Flushes the observers' final output; must run while the FSStore is alive.
     if (impl_ && impl_->cleo) {
         impl_->cleo->sdm->after_timestepping();
     }

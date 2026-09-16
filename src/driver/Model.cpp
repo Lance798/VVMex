@@ -35,7 +35,7 @@ Model::Model(const Utils::ConfigurationManager& config,
 
     if (config_.get_value<bool>("physics.cleo.enable_cleo", false)) {
         std::cout << "[CLEO] CLEO enabled" << std::endl;
-        cleo_ = std::make_unique<Physics::CLEO_Interface>(config_, grid_, params_, halo_exchanger_, state_);
+        cleo_ = std::make_unique<Physics::CLEO_Interface>(config_, grid_, halo_exchanger_, state_);
     }
 
     if (config_.get_value<bool>("physics.turbulence.enable_turbulence", false)) {
