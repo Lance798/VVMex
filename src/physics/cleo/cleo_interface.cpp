@@ -3,6 +3,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <iostream>
 #include <memory>
@@ -19,7 +20,7 @@
 #include "initialise/init_all_supers_from_binary.hpp"
 #include "initialise/initgbxsnull.hpp"
 #include "initialise/timesteps.hpp"
-#include "observers/collect_data_for_simple_dataset.hpp"
+#include "cartesiandomain/collect_data_for_collective_dataset.hpp"
 #include "observers/gbxindex_observer.hpp"
 #include "observers/massmoments_observer.hpp"
 #include "observers/nsupers_observer.hpp"
@@ -42,7 +43,7 @@
 #include "superdrops/collisions/longhydroprob.hpp"
 #include "superdrops/condensation.hpp"
 #include "zarr/fsstore.hpp"
-#include "zarr/simple_dataset.hpp"
+#include "zarr/collective_dataset.hpp"
 #include "core/Field.hpp"
 
 namespace VVM {
@@ -51,7 +52,16 @@ namespace Physics {
 namespace {
 
 using Store = FSStore;
-using Dataset = SimpleDataset<Store>;
+/* CollectiveDataset, not SimpleDataset.
+
+SimpleDataset has no notion of MPI: every rank would open the same FSStore path
+and write its own gridboxes starting at index 0 of arrays that are dimensioned
+for the WHOLE domain (physics.cleo.ngbxs is global). With two ranks that means
+each overwrites the other's half and the far half of every row stays empty, while
+the ragged superdroplet arrays interleave into nonsense. Nothing reports it --
+the zarr is simply wrong. CollectiveDataset takes the decomposition and places
+each rank's slice at the right offset. */
+using Dataset = CollectiveDataset<Store, CartesianDecomposition>;
 
 static SuppliedDecomposition
 supplied_from_grid(const Core::Grid& grid) {
@@ -125,8 +135,24 @@ create_microphysics(const Timesteps& ts, const Utils::ConfigurationManager& conf
         ConstNFrags(config.get_value<double>("physics.cleo.microphysics.breakup_nfrags", 5.0));
     const CoalBuReFlag auto coalbure_flag = TSCoalBuReFlag(RogersGKTerminalVelocity{});
 
+    // Collision is disabled by giving ConstTstepMicrophysics an interval of
+    // LIMITVALUES::uintmax: on_step() special-cases that value and never fires, so
+    // neither the Monte-Carlo step nor the Fisher-Yates shuffle runs. Keeping the
+    // same type here is what lets this be a runtime switch at all.
+    const auto enable_collision =
+        config.get_value<bool>("physics.cleo.microphysics.enable_collision", true);
+    const auto collint = enable_collision ? ts.get_collstep() : LIMITVALUES::uintmax;
+
+    // Without a seed CLEO seeds the pool from std::random_device, so no two runs
+    // agree. A non-zero collision_seed makes a single-rank run reproducible; it does
+    // NOT make ranks agree, because the pool's state is per-thread, not per-gridbox.
+    const auto collision_seed =
+        config.get_value<std::uint64_t>("physics.cleo.microphysics.collision_seed", 0);
+
     const MicrophysicalProcess auto colls =
-        CoalBuRe(ts.get_collstep(), &step2realtime, collprob, nfrags, coalbure_flag);
+        collision_seed
+            ? CoalBuRe(collint, &step2realtime, collprob, nfrags, coalbure_flag, collision_seed)
+            : CoalBuRe(collint, &step2realtime, collprob, nfrags, coalbure_flag);
     return colls >> cond;
 }
 
@@ -153,8 +179,18 @@ create_superdrops_observer(
     CollectDataForDataset<Dataset> auto coord1 = CollectCoord1(dataset, maxchunk);
     CollectDataForDataset<Dataset> auto coord2 = CollectCoord2(dataset, maxchunk);
 
+    /* sdId FIRST, and the order matters.
+
+    CollectiveDataset::write_to_ragged_array reorders every superdroplet array
+    through global_superdroplet_ordering, which it builds from the sdId array as
+    a side effect of writing it -- so any array written before sdId indexes that
+    table while it still holds its UINT_MAX fill value. CLEO says so in a comment
+    on that function; it is not visible from this end. Under SimpleDataset the
+    order is irrelevant, which is why the old chain (sdId last) went unnoticed.
+    CombinedCollectDataForDataset writes its left operand first, and >> is
+    left-associative, so leftmost is written first. */
     const auto collect_sddata =
-        coord1 >> coord2 >> coord3 >> msol >> radius >> xi >> sdgbxindex >> sdid;
+        sdid >> sdgbxindex >> xi >> radius >> msol >> coord3 >> coord2 >> coord1;
     return SuperdropsObserver(interval, dataset, store, maxchunk, collect_sddata);
 }
 
@@ -194,10 +230,10 @@ inline Observer auto
 create_observer(const Timesteps& ts,
     const Utils::ConfigurationManager& config,
     Dataset& dataset,
-    Store& store) {
+    Store& store,
+    const size_t ngbxs) {
     const auto obsstep = ts.get_obsstep();
     const auto maxchunk = config.get_value<size_t>("physics.cleo.output.maxchunk");
-    const auto ngbxs = config.get_value<std::size_t>("physics.cleo.ngbxs");
 
     const Observer auto obs0 = StreamOutObserver(obsstep, &step2realtime);
 
@@ -323,22 +359,40 @@ struct CleoState {
               3,
               config.get_value<std::string>("physics.cleo.init_gbx_path"),
               supplied_from_grid(grid))),
+          // gbxmaps, not the bare local gridbox count: the binary numbers gridboxes
+          // globally and every rank reads all of it, so the indexes have to be
+          // mapped onto this rank before anything can tell "not mine" apart from
+          // "somewhere else in my partition".
           allsupers(
               create_supers(InitAllSupersFromBinary(config.get_value<std::size_t>(
                                                         "physics.cleo.superdroplets.max_total"),
                                 config.get_value<std::string>("physics.cleo.init_supers_path"),
                                 3),
-                  gbxmaps.get_local_ngridboxes_hostcopy())),
+                  gbxmaps)),
           gbxs(create_gbxs(
               gbxmaps, InitGbxsNull(gbxmaps.get_local_ngridboxes_hostcopy()), allsupers)),
           sdm(erase_sdm(SDMMethods(ts.get_couplstep(),
               gbxmaps,
               create_microphysics(ts, config),
               create_movement(ts, gbxmaps),
-              create_observer(ts, config, dataset, store)))),
+              // The LOCAL gridbox count, not physics.cleo.ngbxs. CollectiveDataset
+              // treats each rank's declared dimension as that rank's share and sums
+              // them into the global one, so handing every rank the global count
+              // makes every gridbox-dimensioned array comm_size times too wide,
+              // with each rank's slice written at the wrong offset.
+              create_observer(ts, config, dataset, store,
+                  gbxmaps.get_local_ngridboxes_hostcopy())))),
           lnz(grid.get_local_physical_points_z()), lnx(grid.get_local_physical_points_x()),
           lny(grid.get_local_physical_points_y()), halo(grid.get_halo_cells()),
           average_over_y(config.get_value("physics.cleo.average_over_y", false)) {
+        /* Must follow sdm: the observers are built during its construction and
+        hold the dataset by reference, so the decomposition only has to be in
+        place before the first write, not before they are created. This is the
+        order CLEO's own examples/fromfile/src/main_fromfile.cpp uses. */
+        dataset.set_decomposition(gbxmaps.get_domain_decomposition());
+        dataset.set_max_superdroplets(
+            config.get_value<unsigned int>("physics.cleo.superdroplets.max_total"));
+
         sdm->prepare_to_timestep(gbxs, allsupers);
 
         // The coupling loops decode CLEO's gridbox index with these three sizes;
@@ -457,6 +511,13 @@ struct CLEO_Interface::Impl {
 
     void
     initialize(Core::State& state) {
+        /* Before CleoState, not inside it. CollectiveDataset grabs the
+        communicator in its constructor, and CleoState builds `dataset` before
+        `gbxmaps` -- whose initialiser is where supplied_from_grid() used to set
+        it. The dataset then held MPI_COMM_NULL and hung on its first MPI_Gather,
+        inside the TimeObserver's coordinate array, before a single step ran. */
+        init_communicator::set_communicator(grid.get_cart_comm());
+
         cleo = std::make_unique<CleoState>(config, grid);
 
         std::cout << "[CLEO] rank " << grid.get_mpi_rank()
