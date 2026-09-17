@@ -200,8 +200,15 @@ def setup_environment(preset_name):
         env["VVM_BACKEND"] = "gpu" if gpu_enabled else "cpu"
 
         binary_dir = binary_dir_raw.replace("${sourceDir}", vvm_root)
-        env["VVM_BINARY"] = os.path.join(binary_dir, "vvm")
-        print(f"[Info] Execution backend: {env['VVM_BACKEND']}  binary: {env['VVM_BINARY']}")
+        # An explicit VVM_BINARY wins. Deriving it from the preset unconditionally
+        # meant an exported override was silently ignored, which is exactly what
+        # you reach for when putting a profiler or a sanitizer in the way. Prefer
+        # --wrap for that; this stays for swapping in a different build entirely.
+        override = os.environ.get("VVM_BINARY", "").strip()
+        env["VVM_BINARY"] = override or os.path.join(binary_dir, "vvm")
+        note = "  (overridden by VVM_BINARY)" if override else ""
+        print(f"[Info] Execution backend: {env['VVM_BACKEND']}  "
+              f"binary: {env['VVM_BINARY']}{note}")
 
         # ----------------------------------------------------------------------
         # HPCX / MPI environment metadata
@@ -1100,6 +1107,11 @@ def parse_args():
     parser.add_argument("-c", "--config", help="Path to JSON configuration file")
     parser.add_argument("--preset", type=str, help="CMake preset name to load environment from")
     parser.add_argument("--local", action="store_true", help="Run locally without SLURM")
+    parser.add_argument(
+        "--wrap", type=str, default=None, metavar="CMD",
+        help="run the model under this tool, once per rank, e.g. "
+             "--wrap 'compute-sanitizer --tool memcheck'. The string is word-split, "
+             "so quote it as one argument and avoid paths containing spaces.")
 
     parser.add_argument("--compute", type=int, default=DEFAULT_COMPUTE, help="Compute MPI ranks")
     parser.add_argument(
@@ -1348,6 +1360,8 @@ def main():
     env["OMP_NUM_THREADS"] = str(args.cpus)
     if args.omp_threads is not None:
         env["VVM_OMP_THREADS"] = str(args.omp_threads)
+    if args.wrap:
+        env["VVM_LAUNCH_PREFIX"] = args.wrap
     env["VVM_GPUS"] = str(args.gpus)
     env["VVM_IO_CPUS"] = str(args.io_cpus)
 
@@ -1374,6 +1388,8 @@ def main():
     print(f" Total tasks/node  : {tasks_per_node}")
     print(f" Backend           : {env.get('VVM_BACKEND', 'gpu')}")
     print(f" Binary            : {env.get('VVM_BINARY', '<default>')}")
+    if env.get("VVM_LAUNCH_PREFIX"):
+        print(f" Wrapped in        : {env['VVM_LAUNCH_PREFIX']}")
     if cpu_backend:
         print(" GPUs/node         : none (CPU build)")
     else:
@@ -1456,7 +1472,9 @@ def main():
         cmd.append(script_path)
 
     try:
+        print("command:", ' '.join(cmd))
         subprocess.run(cmd, env=env, check=True)
+
     except subprocess.CalledProcessError as e:
         print(f"\n[Error] Process failed with code {e.returncode}")
         sys.exit(e.returncode)

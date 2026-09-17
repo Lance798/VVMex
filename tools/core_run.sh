@@ -7,6 +7,16 @@ set -e
 export VVM_BACKEND="${VVM_BACKEND:-gpu}"
 export VVM_BINARY="${VVM_BINARY:-./build/vvm}"
 
+# A tool to run the model under: compute-sanitizer, nsys, ncu, gdb, strace, ...
+# It is placed immediately before $VVM_BINARY, inside mpirun, so each rank gets
+# its own instance -- which is what compute-sanitizer and nsys both need.
+#
+#   ./submit.py --wrap "compute-sanitizer --tool memcheck --log-file san.%q{OMPI_COMM_WORLD_RANK}.log" ...
+#
+# Deliberately expanded UNQUOTED at the call sites: this is a command plus its
+# flags, not one word. A tool path containing spaces is therefore not supported.
+export VVM_LAUNCH_PREFIX="${VVM_LAUNCH_PREFIX:-}"
+
 prepend_ld_library_path() {
     local paths="$1"
     if [ -n "$paths" ]; then
@@ -178,7 +188,8 @@ if [ "$VVM_BACKEND" = "cpu" ]; then
        && [ "$GLOBAL_RANK" -ge "$VVM_COMPUTE_TASKS" ]; then
         export OMP_NUM_THREADS="${VVM_IO_CPUS:-1}"
     fi
-    exec "$VVM_BINARY" "$@"
+    # shellcheck disable=SC2086  # VVM_LAUNCH_PREFIX must word-split
+    exec $VVM_LAUNCH_PREFIX "$VVM_BINARY" "$@"
 fi
 
 parse_gpu_list() {
@@ -516,10 +527,14 @@ clamp_omp_to_binding() {
 }
 
 launch_vvm() {
+    # shellcheck disable=SC2086  # VVM_LAUNCH_PREFIX must word-split
     if [ -n "$CPU_BIND_LIST" ]; then
-        exec taskset -c "$CPU_BIND_LIST" "$VVM_BINARY" "$@"
+        # taskset stays outermost so the tool inherits this rank affinity mask too.
+        # NOTE: no apostrophes anywhere in here -- this whole block lives inside
+        # the single-quoted INLINE_WRAPPER string, and one would end it early.
+        exec taskset -c "$CPU_BIND_LIST" $VVM_LAUNCH_PREFIX "$VVM_BINARY" "$@"
     fi
-    exec "$VVM_BINARY" "$@"
+    exec $VVM_LAUNCH_PREFIX "$VVM_BINARY" "$@"
 }
 
 # IO server ranks are host-only. main.cpp assigns the role by *global* rank
@@ -607,6 +622,7 @@ mpirun -np $VVM_TOTAL_TASKS \
  -x VVM_GPUS \
  -x VVM_BACKEND \
  -x VVM_BINARY \
+ -x VVM_LAUNCH_PREFIX \
  -x VVM_IO_CPUS \
  -x VVM_GPU_LIST \
  -x VVM_PARENT_CUDA_VISIBLE_DEVICES \
