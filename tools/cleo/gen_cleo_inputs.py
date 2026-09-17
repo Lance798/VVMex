@@ -379,7 +379,11 @@ def write_grid(paths: dict, grid: dict, figures, figpath: Path) -> None:
     geninitconds.generate_gridbox_boundaries(
         str(paths["grid"]), grid["zgrid"], grid["xgrid"], grid["ygrid"],
         str(paths["constants"]), isprintinfo=True, isfigures=figures,
-        savefigpath=str(figpath))
+        # A Path, not a str: cleopy builds the figure filename with the "/"
+        # operator. read_gbxboundaries happens to survive a str because its right
+        # operand is a Path, but read_initsuperdrops has str on both sides and
+        # raises TypeError -- after the binaries are already written.
+        savefigpath=figpath)
 
 
 def compute_nsupers(paths: dict, s: dict) -> dict:
@@ -435,7 +439,7 @@ def write_initsupers(paths: dict, s: dict, grid: dict, nsupers: dict,
         initattrsgen, str(paths["initsupers"]), str(paths["config"]),
         str(paths["constants"]), str(paths["grid"]), nsupers,
         np.sum(s["scalefacs"]), numconc_tolerance=s["numconc_tolerance"],
-        isprintinfo=True, isfigures=figures, savefigpath=str(figpath), gbxs2plt=[0])
+        isprintinfo=True, isfigures=figures, savefigpath=figpath, gbxs2plt=[0])
 
 
 def report_domain_totals(paths: dict, s: dict) -> None:
@@ -575,6 +579,21 @@ def main():
         die(f"no gridbox has its upper bound below physics.cleo.superdroplets."
             f"seed_below_z_m = {s['zlim']} m; the lowest level ends at "
             f"{grid['zgrid'][1]:.0f} m. Use null to seed every gridbox.")
+    # CLEO's binary format stores each variable's byte offset as a 32-bit unsigned
+    # int (VarMetadata::b0 in libs/initialise/readbinary.hpp), so past about 97
+    # million superdroplets the offsets of the last variables wrap around 2^32 and
+    # point back into the middle of xi and radius. The C++ reader here derives the
+    # offsets in 64 bits instead of trusting the stored ones, so such a file reads
+    # correctly -- but the value written into the file is still wrapped, so any
+    # other consumer that trusts it will be silently wrong. Say so rather than
+    # leaving it to be discovered.
+    B0_LIMIT = 2 ** 32
+    if 44 * total + 4096 >= B0_LIMIT:
+        print(f"\n  NOTE: {total} superdroplets puts the last variables' byte offsets past "
+              f"{B0_LIMIT} bytes,\n  which this format records in 32 bits. Reading this file "
+              f"needs the 64-bit offset\n  derivation in readbinary.cpp; a stock CLEO would "
+              f"read the coordinates as garbage.\n")
+
     # max_total is derived, never read as an input: it is per_gridbox times the
     # number of seeded gridboxes, and InitAllSupersFromBinary demands it equal the
     # binary's count exactly. Validating against whatever is already in the JSON
