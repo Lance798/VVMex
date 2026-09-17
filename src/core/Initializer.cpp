@@ -650,9 +650,17 @@ void Initializer::assign_vars() const {
     const auto& pbar = state_.get_field<1>("pbar").get_device_data();
     auto& pbar_up = state_.get_field<1>("pbar_up").get_mutable_device_data();
     auto& dpbar_mid = state_.get_field<1>("dpbar_mid").get_mutable_device_data();
+    // pbar_up(k) is the interface above cell k, so the topmost cell has nothing
+    // above it to average with. k == nz-1 used to fall into the averaging branch
+    // and read pbar(nz), one element past a view of exactly nz -- compute-sanitizer
+    // flags it as an "Invalid __global__ read ... 1 bytes after the nearest
+    // allocation", and because the read stays inside the same page the hardware
+    // never faults, so it went unnoticed. Mirror the k == 1 treatment at the
+    // bottom instead. Only the top halo level changes, from undefined to defined:
+    // P3 and CLEO both read k = halo .. nz-halo-1 only.
     Kokkos::parallel_for("assign_pbar_up", Kokkos::RangePolicy<>(1, nz),
         KOKKOS_LAMBDA(const int k) {
-            if (k == 1) pbar_up(k) = pbar(k);
+            if (k == 1 || k == nz - 1) pbar_up(k) = pbar(k);
             else pbar_up(k) = real(0.5)*(pbar(k) + pbar(k+1));
         }
     );
