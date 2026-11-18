@@ -201,19 +201,19 @@
     },
     {
       "name": "spark",
-      "displayName": "NVHPC 25.9 on spark",
-      "description": "aarch64, NVHPC 25.9",
+      "displayName": "NVHPC 26.5 on spark",
+      "description": "aarch64, NVHPC 26.5",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "NVHPC_DIR": "/home/mog/nvhpc_25_9/Linux_aarch64/25.9",
-        "HDF5_DIR": "/home/mog/Aaron/libs_GPUVVM",
-        "NETCDF_C_DIR": "/home/mog/Aaron/libs_GPUVVM",
-        "NETCDF_Fortran_DIR": "/home/mog/Aaron/libs_GPUVVM",
-        "PNETCDF_DIR": "/home/mog/Aaron/libs_GPUVVM",
-        "Kokkos_DIR": "/home/mog/Aaron/libs_GPUVVM-kokkos-async",
-        "ADIOS2_DIR": "/home/mog/Aaron/libs_GPUVVM",
+        "NVHPC_DIR": "/opt/nvidia/hpc_sdk/Linux_aarch64/26.5",
+        "HDF5_DIR": "/shared/libs_VVMex",
+        "NETCDF_C_DIR": "/shared/libs_VVMex",
+        "NETCDF_Fortran_DIR": "/shared/libs_VVMex",
+        "PNETCDF_DIR": "/shared/libs_VVMex",
+        "Kokkos_DIR": "/shared/libs_VVMex",
+        "ADIOS2_DIR": "/shared/libs_VVMex",
         "VVM_ENABLE_GPU": "ON",
         "ENABLE_NCCL": "ON",
         "EAMXX_ENABLE_GPU": "ON",
@@ -223,7 +223,11 @@
         "RRTMGP_USE_DOUBLE_PRECISION": "ON",
         "SCREAM_PACK_SIZE": "1",
         "SCREAM_SMALL_PACK_SIZE": "1",
-        "SCREAM_P3_SMALL_KERNELS": "OFF"
+        "SCREAM_P3_SMALL_KERNELS": "OFF",
+        "Python3_EXECUTABLE": "${sourceDir}/.venv/bin/python3"
+      },
+      "environment": {
+        "VVM_ROOT": "${sourceDir}"
       }
     },
     {
